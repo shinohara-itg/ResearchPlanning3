@@ -2022,7 +2022,7 @@ with center:
                         p.font.size = Pt(11)
                     if df.at[i, "非営業日"]:
                         cell.fill.solid()
-                        cell.fill.fore_color.rgb = RGBColor(230, 230, 230)
+                        cell.fill.fore_color.rgb = RGBColor(220, 220, 220)
                     else:
                         cell.fill.solid()
                         cell.fill.fore_color.rgb = RGBColor(255, 255, 255)
@@ -2040,12 +2040,15 @@ with center:
         from pptx.dml.color import RGBColor
         from pptx.enum.text import PP_ALIGN
         import pandas as pd
+        import math
 
-        # ------------------------------------------------
-        # 🔑 スライド7にスケジュール表を反映する関数（白黒カラー）
-        # ------------------------------------------------
         def reflect_schedule_to_slide7(prs, calendar_df: pd.DataFrame):
-            """スライド7にスケジュール表を挿入（白黒カラーに固定）"""
+            """
+            スライド7にスケジュール表を3分割して挿入
+            - calendar_df: 「日付」「曜日」「マイルストン」「非営業日」を含む DataFrame を想定
+            - スライド上の Shape名 schedule1 / schedule2 / schedule3 の位置・サイズに表を配置
+            - 非営業日(True)の行は薄いグレーでハイライト
+            """
             slide_index = 15  # スライド7（0始まり）
             if slide_index >= len(prs.slides):
                 st.error("スライド7がテンプレートに存在しません。")
@@ -2053,63 +2056,110 @@ with center:
 
             slide = prs.slides[slide_index]
 
-            # 既存の表やスケジュール用図形を削除（必要に応じて）
+            # 既存の Table/Schedule（先に作った表など）を削除
             for shp in list(slide.shapes):
                 name = getattr(shp, "name", "")
+                # ここは Table*, Schedule*（大文字）だけ消すので、schedule1〜3 は消さない
                 if name.startswith("Table") or name.startswith("Schedule"):
                     try:
                         slide.shapes._spTree.remove(shp._element)
                     except Exception:
                         pass
 
-            # DataFrame は「日付」「曜日」「マイルストン」列を想定
-            rows, cols = len(calendar_df) + 1, 3
-            left, top, width, height = Inches(0.5), Inches(1.2), Inches(9), Inches(5.0)
-            table = slide.shapes.add_table(rows, cols, left, top, width, height).table
+            # === schedule1 / schedule2 / schedule3 のプレースホルダ図形を取得 ===
+            placeholders = {}
+            for shp in slide.shapes:
+                name = getattr(shp, "name", "")
+                if name in ["schedule1", "schedule2", "schedule3"]:
+                    placeholders[name] = shp
 
+            # 3つともなくても動くようにする（ある分だけ使う）
+            # DataFrameインデックスを整理
+            df = calendar_df.reset_index(drop=True)
+            total_rows = len(df)
+            if total_rows == 0:
+                return prs
+
+            # 3ブロックに分割
+            rows_per_block = math.ceil(total_rows / 3)
+
+            # ===== カラー設定 =====
+            header_fill_color   = RGBColor(230, 230, 230)  # ヘッダー：薄いグレー
+            body_fill_color     = RGBColor(255, 255, 255)  # 平日：白
+            holiday_fill_color  = RGBColor(240, 240, 240)  # 非営業日：さらに薄いグレー
+            text_color          = RGBColor(0, 0, 0)        # 黒
             headers = ["日付", "曜日", "マイルストン"]
 
-            # ===== カラー設定（白黒） =====
-            header_fill_color = RGBColor(230, 230, 230)  # 薄いグレー
-            body_fill_color   = RGBColor(255, 255, 255)  # 白
-            text_color        = RGBColor(0, 0, 0)        # 黒
+            # 各ブロック（1〜3）を、それぞれ schedule1〜3 の位置に描画
+            for block_idx in range(3):
+                start_idx = block_idx * rows_per_block
+                end_idx = min(start_idx + rows_per_block, total_rows)
+                block_df = df.iloc[start_idx:end_idx]
 
-            # ヘッダー行
-            for j, h in enumerate(headers):
-                cell = table.cell(0, j)
-                cell.text = h
+                if block_df.empty:
+                    continue
 
-                # 背景色（グレー）
-                cell.fill.solid()
-                cell.fill.fore_color.rgb = header_fill_color
+                placeholder_name = f"schedule{block_idx + 1}"
+                ph = placeholders.get(placeholder_name)
+                if ph is None:
+                    # schedule1/2/3 のどれかが無い場合、そのブロックはスキップ
+                    continue
 
-                for p in cell.text_frame.paragraphs:
-                    p.font.bold = True
-                    p.font.size = Pt(12)
-                    p.alignment = PP_ALIGN.CENTER
-                    p.font.name = "Meiryo UI"
-                    p.font.color.rgb = text_color
+                # プレースホルダ図形の位置とサイズを取得
+                left   = ph.left
+                top    = ph.top
+                width  = ph.width
+                height = ph.height
 
-            # データ行
-            for i, (_, row) in enumerate(calendar_df.iterrows()):
-                table.cell(i + 1, 0).text = str(row.get("日付", ""))
-                table.cell(i + 1, 1).text = str(row.get("曜日", ""))
-                table.cell(i + 1, 2).text = str(row.get("マイルストン", ""))
+                # プレースホルダを削除（同じ位置に表を置く）
+                try:
+                    slide.shapes._spTree.remove(ph._element)
+                except Exception:
+                    pass
 
-                for j in range(3):
-                    cell = table.cell(i + 1, j)
+                rows = len(block_df) + 1  # ヘッダー行 + データ行
+                cols = 3
 
-                    # 背景色（白）
+                table = slide.shapes.add_table(rows, cols, left, top, width, height).table
+
+                # --- ヘッダー行 ---
+                for j, h in enumerate(headers):
+                    cell = table.cell(0, j)
+                    cell.text = h
+
                     cell.fill.solid()
-                    cell.fill.fore_color.rgb = body_fill_color
+                    cell.fill.fore_color.rgb = header_fill_color
 
-                    # フォント
                     for p in cell.text_frame.paragraphs:
-                        p.font.size = Pt(11)
+                        p.font.bold = True
+                        p.font.size = Pt(12)
+                        p.alignment = PP_ALIGN.CENTER
                         p.font.name = "Meiryo UI"
                         p.font.color.rgb = text_color
 
+                # --- データ行 ---
+                for i, (_, row) in enumerate(block_df.iterrows()):
+                    table.cell(i + 1, 0).text = str(row.get("日付", ""))
+                    table.cell(i + 1, 1).text = str(row.get("曜日", ""))
+                    table.cell(i + 1, 2).text = str(row.get("マイルストン", ""))
+
+                    is_holiday = bool(row.get("非営業日", False))
+
+                    for j in range(3):
+                        cell = table.cell(i + 1, j)
+
+                        # 非営業日は薄いグレー、それ以外は白
+                        cell.fill.solid()
+                        cell.fill.fore_color.rgb = holiday_fill_color if is_holiday else body_fill_color
+
+                        for p in cell.text_frame.paragraphs:
+                            p.font.size = Pt(11)
+                            p.font.name = "Meiryo UI"
+                            p.font.color.rgb = text_color
+
             return prs
+
+
 
         # ------------------------------------------------
         # Streamlit UI（ここで schedule_phase_draft を反映）
@@ -2211,7 +2261,7 @@ with center:
         
     # =========================
     # 中央ペイン
-    # === 概算見積 ===
+    # === 概算見積（演算＆5パターン表示）===
     elif mode == "概算見積":
         st.markdown("## 概算見積")
 
@@ -2219,14 +2269,14 @@ with center:
 
         # ★ 前回反映フラグが立っていれば成功メッセージを一度だけ表示
         if st.session_state.get("estimate_applied"):
-            st.success("スライド8（概算見積）の EDIT_amount に反映しました！")
+            st.success("スライド8（概算見積）の EDIT_amount1〜5 に反映しました！")
             st.session_state["estimate_applied"] = False
 
         # ---- PPTプレビュー表示（スライド8：画像プレビュー）----
         if pptx_path:
             try:
                 images = pptx_to_images(pptx_path)
-                if len(images) > 16:  # スライド8は index=7（0始まり）
+                if len(images) > 16:  # スライド8は index=7（0始まり）…テンプレ側に合わせて調整
                     st.image(images[16], caption="スライド8：概算見積", use_container_width=True)
                 else:
                     st.warning("スライド8（概算見積）がテンプレートに存在しません。")
@@ -2236,10 +2286,10 @@ with center:
             st.info("PPTテンプレートをアップロードしてください。")
 
         st.markdown("---")
-        st.markdown("### 🧮 概算見積入力")
+        st.markdown("### 🧮 入力内容にもとづく概算見積（右ペインで仕様を入力してください）")
 
         # ======================
-        # 価格テーブル・関数群
+        # 価格テーブル・関数群（既存ロジックをそのまま使用）
         # ======================
         import pandas as pd
         from pathlib import Path
@@ -2305,118 +2355,167 @@ with center:
             return v / 10000.0
 
         # ======================
-        # 企画費用（人時）
+        # 右ペインで入力された値を session_state から取得
         # ======================
-        st.markdown("#### ■企画費用（人件費）")
-        col1, col2 = st.columns(2)
+        hours_plan = float(st.session_state.get("hours_plan", 0.0))
+        hours_field = float(st.session_state.get("hours_field", 0.0))
+        hours_agg = float(st.session_state.get("hours_agg", 0.0))
+        hours_analysis = float(st.session_state.get("hours_analysis", 0.0))
 
-        with col1:
-            hours_plan = st.number_input("調査企画（人時）", min_value=0.0, step=0.5, value=0.0)
-            hours_field = st.number_input("調査実査（人時）", min_value=0.0, step=0.5, value=0.0)
+        scr_q = int(st.session_state.get("scr_q", 5))
+        scr_n = int(st.session_state.get("scr_n", 10000))
+        main_q = int(st.session_state.get("main_q", 20))
+        main_n = int(st.session_state.get("main_n", 300))
 
-        with col2:
-            hours_agg = st.number_input("集計（人時）", min_value=0.0, step=0.5, value=0.0)
-            hours_analysis = st.number_input("分析・報告（人時）", min_value=0.0, step=0.5, value=0.0)
+        # 右ペイン未入力時のガード
+        if hours_plan == hours_field == hours_agg == hours_analysis == 0 and \
+        scr_q == 0 and scr_n == 0 and main_q == 0 and main_n == 0:
+            st.info("右ペインで『企画費用（人件費）』と『実査費用（ベース仕様）』を入力してください。")
+            st.stop()
 
+
+        # ======================
+        # 企画費用（人件費） 共通計算
+        # ======================
         cost_plan = hours_plan * HOUR_RATE
         cost_field = hours_field * HOUR_RATE
         cost_agg = hours_agg * HOUR_RATE
         cost_analysis = hours_analysis * HOUR_RATE
         planning_total = cost_plan + cost_field + cost_agg + cost_analysis
 
-        st.markdown(
-            f"""
-- 調査企画：**{hours_plan:.1f}人時 ≒ {to_man_yen(cost_plan):,.1f} 万円**
-- 調査実査：**{hours_field:.1f}人時 ≒ {to_man_yen(cost_field):,.1f} 万円**
-- 集計：**{hours_agg:.1f}人時 ≒ {to_man_yen(cost_agg):,.1f} 万円**
-- 分析・報告：**{hours_analysis:.1f}人時 ≒ {to_man_yen(cost_analysis):,.1f} 万円**
-
-▶ 企画費用 小計：**{to_man_yen(planning_total):,.1f} 万円**
-"""
-        )
-
-        st.markdown("---")
+        # スクリーニング費用（全パターン共通）
+        scr_cost_base = lookup_price(SCR_TABLE, scr_q, scr_n)
 
         # ======================
-        # 実査費用（スクリーニング＋本調査）
+        # 5パターンの仕様生成
         # ======================
-        st.markdown("#### ■実査費用")
+        patterns = []
 
-        st.markdown("**スクリーニング調査**")
-        cs1, cs2 = st.columns(2)
-        with cs1:
-            scr_q = st.number_input("スクリーニング 質問数（問）", min_value=0, step=1, value=5)
-        with cs2:
-            scr_n = st.number_input("スクリーニング サンプルサイズ", min_value=0, step=1000, value=10000)
+        def make_pattern(name: str, label: str, q: int, n: int):
+            main_cost = lookup_price(MAIN_TABLE, q, n)
+            survey_total = scr_cost_base + main_cost
+            total_cost = planning_total + survey_total
 
-        scr_cost = lookup_price(SCR_TABLE, scr_q, scr_n)
-        st.markdown(
-            f"・スクリーニング：**{scr_q}問 × {scr_n:,}ss ≒ {to_man_yen(scr_cost):,.1f} 万円**"
+            summary_lines = [
+                f"■{label}",
+                "",
+                "【企画費用（人件費）】",
+                f"・調査企画：{hours_plan:.1f}人時 ＝ {to_man_yen(cost_plan):,.1f} 万円",
+                f"・調査実査：{hours_field:.1f}人時 ＝ {to_man_yen(cost_field):,.1f} 万円",
+                f"・集計：{hours_agg:.1f}人時 ＝ {to_man_yen(cost_agg):,.1f} 万円",
+                f"・分析・報告：{hours_analysis:.1f}人時 ＝ {to_man_yen(cost_analysis):,.1f} 万円",
+                f"▶ 企画費用 小計：{to_man_yen(planning_total):,.1f} 万円",
+                "",
+                "【実査費用】",
+                f"・スクリーニング：{scr_q}問 × {scr_n:,}ss ＝ {to_man_yen(scr_cost_base):,.1f} 万円",
+                f"・本調査：{q}問 × {n:,}ss ＝ {to_man_yen(main_cost):,.1f} 万円",
+                f"▶ 実査費用 小計：{to_man_yen(survey_total):,.1f} 万円",
+                "",
+                f"■概算合計：{to_man_yen(total_cost):,.1f} 万円（税別）",
+            ]
+            return {
+                "name": name,
+                "label": label,
+                "q": q,
+                "n": n,
+                "main_cost": main_cost,
+                "survey_total": survey_total,
+                "total_cost": total_cost,
+                "summary": "\n".join(summary_lines),
+            }
+
+        # 1) ベース仕様
+        patterns.append(
+            make_pattern(
+                "pattern1",
+                "ベース仕様（入力どおり）",
+                main_q,
+                main_n,
+            )
         )
 
-        st.markdown("**本調査**")
-        cm1, cm2 = st.columns(2)
-        with cm1:
-            main_q = st.number_input("本調査 質問数（問）", min_value=0, step=1, value=20)
-        with cm2:
-            main_n = st.number_input("本調査 サンプルサイズ", min_value=0, step=100, value=300)
-
-        main_cost = lookup_price(MAIN_TABLE, main_q, main_n)
-        st.markdown(
-            f"・本調査：**{main_q}問 × {main_n:,}ss ≒ {to_man_yen(main_cost):,.1f} 万円**"
+        # 2) 本調査サンプルサイズのみ半分
+        patterns.append(
+            make_pattern(
+                "pattern2",
+                "本調査サンプルサイズを半分にした場合",
+                main_q,
+                max(1, main_n // 2),
+            )
         )
 
-        survey_total = scr_cost + main_cost
-        st.markdown(
-            f"▶ 実査費用 小計：**{to_man_yen(survey_total):,.1f} 万円**"
+        # 3) 本調査サンプルサイズのみ2倍
+        patterns.append(
+            make_pattern(
+                "pattern3",
+                "本調査サンプルサイズを2倍にした場合",
+                main_q,
+                max(1, main_n * 2),
+            )
         )
+
+        # 4) 本調査質問数のみ5問減
+        patterns.append(
+            make_pattern(
+                "pattern4",
+                "本調査質問数を5問減らした場合",
+                max(1, main_q - 5),
+                main_n,
+            )
+        )
+
+        # 5) 本調査質問数のみ5問増
+        patterns.append(
+            make_pattern(
+                "pattern5",
+                "本調査質問数を5問増やした場合",
+                max(1, main_q + 5),
+                main_n,
+            )
+        )
+
+        # ======================
+        # 5パターン概要テーブル表示
+        # ======================
+        st.markdown("### 📊 5パターンの比較サマリー")
+
+        df_view = pd.DataFrame(
+            [
+                {
+                    "パターン": p["label"],
+                    "本調査質問数": p["q"],
+                    "本調査サンプルサイズ": p["n"],
+                    "概算合計（万円）": f"{to_man_yen(p['total_cost']):,.1f}",
+                }
+                for p in patterns
+            ]
+        )
+
+        st.dataframe(df_view, use_container_width=True)
 
         st.markdown("---")
+        st.markdown("### 📝 スライド貼り付けプレビュー（各パターン）")
 
-        # ======================
-        # 概算合計
-        # ======================
-        total_cost = planning_total + survey_total
-        st.markdown(
-            f"### 💡 概算合計：**{to_man_yen(total_cost):,.1f} 万円（税別）**"
-        )
+        # テキストプレビュー＋ session_state に保存
+        for idx, p in enumerate(patterns, start=1):
+            key_txt = f"estimate_summary{idx}"
+            st.session_state[key_txt] = p["summary"]
 
-        # ===============================
-        # スライド貼り付け用サマリー文字列
-        # ===============================
-        summary_lines = [
-            "■企画費用",
-            f"・調査企画：{hours_plan:.1f}人時 ＝ {to_man_yen(cost_plan):,.1f} 万円",
-            f"・調査実査：{hours_field:.1f}人時 ＝ {to_man_yen(cost_field):,.1f} 万円",
-            f"・集計：{hours_agg:.1f}人時 ＝ {to_man_yen(cost_agg):,.1f} 万円",
-            f"・分析・報告：{hours_analysis:.1f}人時 ＝ {to_man_yen(cost_analysis):,.1f} 万円",
-            f"▶ 企画費用 小計：{to_man_yen(planning_total):,.1f} 万円",
-            "",
-            "■実査費用",
-            f"・スクリーニング：{scr_q}問 × {scr_n:,}ss ＝ {to_man_yen(scr_cost):,.1f} 万円",
-            f"・本調査：{main_q}問 × {main_n:,}ss ＝ {to_man_yen(main_cost):,.1f} 万円",
-            f"▶ 実査費用 小計：{to_man_yen(survey_total):,.1f} 万円",
-            "",
-            f"■概算合計：{to_man_yen(total_cost):,.1f} 万円（税別）",
-        ]
-        estimate_summary = "\n".join(summary_lines)
-        st.session_state["estimate_summary"] = estimate_summary
-
-        st.markdown("---")
-        st.markdown("### スライド貼り付けプレビュー（テキスト形式）")
-        st.text_area(
-            "この内容が概算見積スライド（EDIT_amount）に貼り付けられます",
-            value=estimate_summary,
-            height=260,
-        )
+            st.markdown(f"#### パターン{idx}：{p['label']}")
+            st.text_area(
+                f"スライド用テキスト（EDIT_amount{idx} に反映）",
+                value=p["summary"],
+                height=260,
+                key=f"estimate_summary_area_{idx}",
+            )
+            st.markdown("---")
 
         # ===============================
-        # 📤 PowerPoint反映ボタン（EDIT_amount）
+        # 📤 PowerPoint反映ボタン（EDIT_amount1〜5）
         # ===============================
-        st.markdown("---")
-        st.markdown("### 📤 概算見積をPowerPointに反映")
+        st.markdown("### 📤 5パターンを PowerPoint に反映（EDIT_amount1〜5）")
 
-        if st.button("📤 この概算見積をスライド8に反映（EDIT_amount）", use_container_width=True):
+        if st.button("📤 5パターンすべてをスライド8に反映", use_container_width=True):
             pptx_path = st.session_state.get("pptx_path")
 
             if not pptx_path:
@@ -2432,21 +2531,30 @@ with center:
 
                     if slide_index < len(prs.slides):
                         slide = prs.slides[slide_index]
-                        text_to_apply = st.session_state.get("estimate_summary", "")
 
-                        # グループ内も探索して反映（既存ヘルパー）
-                        ok = set_text_to_named_shape(slide, "EDIT_amount", text_to_apply)
+                        applied_count = 0
+                        for idx in range(1, 6):
+                            shape_name = f"EDIT_amount{idx}"
+                            text_to_apply = st.session_state.get(f"estimate_summary{idx}", "")
 
-                        if ok:
-                            # ★ shape を再取得して書式を適用（Arial/12pt/黒/左寄せ）
-                            shp = next((s for s in slide.shapes if s.name == "EDIT_amount"), None)
-                            if shp and getattr(shp, "has_text_frame", False):
-                                apply_text_format(shp)
+                            if not text_to_apply:
+                                continue
 
-                            # プレビュー用キャッシュ
-                            st.session_state.edited_texts["EDIT_amount"] = text_to_apply
+                            ok = set_text_to_named_shape(slide, shape_name, text_to_apply)
 
-                            # ★ 別名保存（他スライドと統一）
+                            if ok:
+                                shp = next((s for s in slide.shapes if s.name == shape_name), None)
+                                if shp and getattr(shp, "has_text_frame", False):
+                                    # ★ 概算見積だけフォントサイズ10ptに統一
+                                    apply_text_format(shp, font_size=10)
+
+                                # プレビュー用キャッシュ
+                                st.session_state.edited_texts[shape_name] = text_to_apply
+                                applied_count += 1
+                            else:
+                                st.warning(f"スライド8内に『{shape_name}』という名前のテキスト図形が見つかりませんでした。")
+
+                        if applied_count > 0:
                             SLIDES_DIR = get_session_dir()
                             SLIDES_DIR.mkdir(parents=True, exist_ok=True)
                             out_path = SLIDES_DIR / f"estimate_slide8_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
@@ -2457,11 +2565,10 @@ with center:
                             # プレビュー更新のためのフラグ
                             st.session_state["estimate_applied"] = True
 
-                            st.success("スライド8（概算見積）に反映しました！（フォント・サイズ・色も統一）")
+                            st.success(f"スライド8（概算見積）に {applied_count} パターン分を反映しました！（フォントサイズ10pt）")
                             st.rerun()
-
                         else:
-                            st.error("スライド8内に『EDIT_amount』という名前のテキスト図形が見つかりませんでした。")
+                            st.error("いずれの EDIT_amount1〜5 にもテキストを反映できませんでした。Shape名やテンプレート構成を確認してください。")
 
                     else:
                         st.error("スライド8がテンプレートに存在しません。")
@@ -3639,12 +3746,107 @@ with right:
 
     # =========================
     # 右ペイン
-    # === 概算見積 ===
+    # === 概算見積（仕様入力）===
     elif mode == "概算見積":
-        st.subheader("右ペイン：概算見積操作")
-        if st.button("💡 ダミーボタン（見積）", use_container_width=True):
-            st.session_state["message_center"] = "💬 『概算見積』でダミーボタンが押されました。"
-            st.rerun()
+        st.subheader("概算見積（仕様入力）")
+        st.caption("ここで企画費用（人件費）と実査費用（ベース仕様）を入力すると、中央ペインで5パターンの見積が計算されます。")
+
+        # -------------------------
+        # セッション状態の初期値を設定
+        # （すでに値があればそのまま維持）
+        # -------------------------
+        default_values = {
+            "hours_plan": 0.0,
+            "hours_field": 0.0,
+            "hours_agg": 0.0,
+            "hours_analysis": 0.0,
+            "scr_q": 5,
+            "scr_n": 10000,
+            "main_q": 20,
+            "main_n": 300,
+        }
+        for k, v in default_values.items():
+            if k not in st.session_state:
+                st.session_state[k] = v
+
+        # -------------------------
+        # ① 企画費用（人件費）
+        # -------------------------
+        st.markdown("### ① 企画費用（人件費）")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.number_input(
+                "調査企画（人時）",
+                min_value=0.0,
+                step=0.5,
+                key="hours_plan",  # ← 中央ペインと同じキー
+            )
+            st.number_input(
+                "調査実査（人時）",
+                min_value=0.0,
+                step=0.5,
+                key="hours_field",
+            )
+
+        with col2:
+            st.number_input(
+                "集計（人時）",
+                min_value=0.0,
+                step=0.5,
+                key="hours_agg",
+            )
+            st.number_input(
+                "分析・報告（人時）",
+                min_value=0.0,
+                step=0.5,
+                key="hours_analysis",
+            )
+
+        st.markdown("---")
+
+        # -------------------------
+        # ② 実査費用（ベース仕様）
+        # -------------------------
+        st.markdown("### ② 実査費用（ベース仕様）")
+
+        st.markdown("**スクリーニング調査**")
+        cs1, cs2 = st.columns(2)
+        with cs1:
+            st.number_input(
+                "スクリーニング 質問数（問）",
+                min_value=0,
+                step=1,
+                key="scr_q",
+            )
+        with cs2:
+            st.number_input(
+                "スクリーニング サンプルサイズ",
+                min_value=0,
+                step=1000,
+                key="scr_n",
+            )
+
+        st.markdown("**本調査**")
+        cm1, cm2 = st.columns(2)
+        with cm1:
+            st.number_input(
+                "本調査 質問数（問）",
+                min_value=0,
+                step=1,
+                key="main_q",
+            )
+        with cm2:
+            st.number_input(
+                "本調査 サンプルサイズ",
+                min_value=0,
+                step=100,
+                key="main_n",
+            )
+
+        st.info("※ここで入力した内容をもとに、中央ペインで概算見積（5パターン比較）が自動計算されます。")
+
 
     # =========================
     # 右ペイン
@@ -3661,8 +3863,8 @@ with right:
         # final があればそれを、なければ現時点のpptxを候補にする
         candidate_path = pptx_path
 
-        st.write("DEBUG_pptx_path:", st.session_state.get("pptx_path"))
-        st.write("DEBUG_final_path:", st.session_state.get("final_pptx_path"))
+        #st.write("DEBUG_pptx_path:", st.session_state.get("pptx_path"))
+        #st.write("DEBUG_final_path:", st.session_state.get("final_pptx_path"))
 
 
         if candidate_path and Path(candidate_path).is_file():
